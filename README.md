@@ -1,8 +1,8 @@
 # Memory & GPU Optimizer
 
-[![License](https://img.shields.io/badge/License-CC%20BY--NC%204.0-lightgrey)](LICENSE)
-[![Windows](https://img.shields.io/badge/platform-Windows%207%2B-brightgreen)](https://www.microsoft.com/windows)
-[![Visual Studio](https://img.shields.io/badge/IDE-Visual%20Studio%202022-purple)](https://visualstudio.microsoft.com/)
+[![License](https://img.shields.io/badge/License-CC%20BY--NC%204.0-lightgrey)](LICENSE.md)
+![Windows](https://img.shields.io/badge/platform-Windows%207%2B-brightgreen)
+![Visual Studio](https://img.shields.io/badge/IDE-Visual%20Studio%202022-purple)
 
 **Memory & GPU Optimizer** 是一款专为 Windows 平台设计的轻量级内存与显存优化工具。它能够一键释放系统工作集、清理待机列表（Standby List），并针对 Java 应用进行内存整理，同时支持进程白名单和动态窗口聚焦保护，有效提升游戏、视频剪辑等重负载场景下的系统响应能力。
 

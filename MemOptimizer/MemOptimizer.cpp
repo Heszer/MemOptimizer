@@ -552,7 +552,7 @@ void EmptyWorkingSets(bool skipWhiteList) {
 void CleanMemoryThread() {
     if (!g_optimizationEnabled) return;
     EmptyWorkingSets(true);
-    MessageBoxW(g_hSimpleDlg ? g_hSimpleDlg : g_hAdvancedDlg, L"内存优化完成（已跳过白名单及聚焦窗口进程）", L"完成", MB_ICONINFORMATION);
+    MessageBoxW(g_hSimpleDlg ? g_hSimpleDlg : g_hAdvancedDlg, L"内存优化完成", L"完成", MB_ICONINFORMATION);
 }
 
 void GameBoostThread() {
@@ -560,12 +560,12 @@ void GameBoostThread() {
     EmptyWorkingSets(true);
     if (RunEmptyStandbyList()) {
         MessageBoxW(g_hSimpleDlg ? g_hSimpleDlg : g_hAdvancedDlg,
-            L"显存优化完成（已清理待机列表）", L"完成", MB_ICONINFORMATION);
+            L"显存优化完成", L"完成", MB_ICONINFORMATION);
     }
     else {
         if (ClearStandbyList()) {
             MessageBoxW(g_hSimpleDlg ? g_hSimpleDlg : g_hAdvancedDlg,
-                L"显存优化完成（已清理工作集和待机内存）", L"完成", MB_ICONINFORMATION);
+                L"显存优化完成", L"完成", MB_ICONINFORMATION);
         }
         else {
             MessageBoxW(g_hSimpleDlg ? g_hSimpleDlg : g_hAdvancedDlg,
@@ -807,7 +807,6 @@ INT_PTR CALLBACK AdvancedDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lPar
         case IDC_BTN_OPT_MEM: std::thread(CleanMemoryThread).detach(); break;
         case IDC_BTN_GAME_BOOST: std::thread(GameBoostThread).detach(); break;
         case IDC_BTN_RESET_DEFAULTS: {
-            g_whiteSet.clear(); UpdateWhiteListUI(); SaveWhiteList();
             int rec = GetRecommendedXmx();
             int resetXmx = std::max(rec / 2, 512);
             SetDlgItemInt(hDlg, IDC_XMX_EDIT, resetXmx, FALSE);
@@ -822,7 +821,7 @@ INT_PTR CALLBACK AdvancedDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lPar
             g_maxFocusCount = 1;
             WriteIni(L"Settings", L"FocusTracking", L"0");
             WriteIni(L"Settings", L"FocusCount", L"1");
-            MessageBoxW(hDlg, L"已关闭优化！", L"提示", MB_ICONINFORMATION);
+            MessageBoxW(hDlg, L"已恢复默认设置", L"提示", MB_ICONINFORMATION);
             break;
         }
         case IDC_BTN_HELP: {
@@ -1038,8 +1037,6 @@ INT_PTR CALLBACK SimpleDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam
                 }).detach();
             break;
         case IDC_SIMPLE_RESET: {
-            g_whiteSet.clear();
-            SaveWhiteList();
             int rec = GetRecommendedXmx();
             int resetXmx = std::max(rec / 2, 512);
             g_xmx = resetXmx;
