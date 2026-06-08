@@ -31,6 +31,15 @@
 
 using namespace Gdiplus;
 
+// 托盘菜单命令 ID
+#define ID_TRAY_OPEN_WINDOW         3001
+#define ID_TRAY_DISABLE_OPT         3002
+#define ID_TRAY_ALL_OPT             3003
+#define ID_TRAY_MEM_OPT             3004
+#define ID_TRAY_VRAM_OPT            3005
+#define ID_TRAY_JVM_OPT             3006
+#define ID_TRAY_EXIT                3007
+
 // 待机列表清除 API
 typedef LONG NTSTATUS;
 typedef enum _MEMORY_LIST_COMMAND { MemoryPurgeStandbyList = 4 } MEMORY_LIST_COMMAND;
@@ -88,11 +97,13 @@ HWND g_hSimpleDlg = nullptr;
 HWND g_hAdvancedDlg = nullptr;
 
 // 全局设置
-std::set<std::wstring> g_whiteSet;
+std::set<std::wstring> g_whiteSet;          // 用户可见白名单（高级窗口显示）
+std::set<std::wstring> g_defaultWhiteSet;   // 隐藏默认白名单（自动保护，不显示，包括自身和系统关键进程）
 bool g_optimizationEnabled = true;
 bool g_focusTrackingEnabled = false;
 int g_maxFocusCount = 1;
 int g_xmx = 2048;
+bool g_hideToTray = true;
 
 // 高级窗口控件
 HWND g_hProcList = nullptr, g_hWhiteList = nullptr;
@@ -123,6 +134,16 @@ ULONG_PTR g_gdiplusToken = 0;
 // 编辑框子类化过程
 WNDPROC g_oldSearchEditProc = nullptr;
 WNDPROC g_oldCountEditProc = nullptr;
+
+// 托盘相关（仅简约窗口管理）
+NOTIFYICONDATAW g_nid = { 0 };
+HMENU g_hTrayMenu = NULL;
+bool g_trayIconAdded = false;
+
+// 前向声明
+void UpdateSimpleDialogControls();
+void UpdateAdvancedDialogControls();
+void ExitProgram();
 
 bool IsElevated() {
     BOOL fIsElevated = FALSE;
@@ -530,7 +551,11 @@ void SetFocusTracking(bool enable) {
 
 bool IsProcessSkipped(const std::wstring& procName) {
     std::wstring lowerName = ToLower(procName);
+    // 优先检查隐藏默认白名单（包括程序自身和系统关键进程）
+    if (g_defaultWhiteSet.find(lowerName) != g_defaultWhiteSet.end()) return true;
+    // 其次检查用户白名单
     if (g_whiteSet.find(lowerName) != g_whiteSet.end()) return true;
+    // 最后检查动态聚焦白名单
     if (g_focusTrackingEnabled && g_focusSet.find(lowerName) != g_focusSet.end()) return true;
     return false;
 }
@@ -608,18 +633,15 @@ void OptimizeJavaProcesses() {
 LRESULT CALLBACK EditSubclassProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case WM_ERASEBKGND: {
-        // 获取父窗口（高级窗口）的背景图片，绘制到编辑框区域
         HWND hParent = GetParent(hWnd);
         if (hParent && g_hBgAdvanced) {
             RECT rcClient;
             GetClientRect(hWnd, &rcClient);
-            // 将编辑框客户区坐标转换为父窗口客户区坐标
             POINT pt = { rcClient.left, rcClient.top };
             MapWindowPoints(hWnd, hParent, &pt, 1);
             HDC hdc = (HDC)wParam;
             HDC hdcMem = CreateCompatibleDC(hdc);
             HBITMAP hOld = (HBITMAP)SelectObject(hdcMem, g_hBgAdvanced);
-            // 从父窗口背景图片中复制对应区域
             BitBlt(hdc, 0, 0, rcClient.right - rcClient.left, rcClient.bottom - rcClient.top,
                 hdcMem, pt.x, pt.y, SRCCOPY);
             SelectObject(hdcMem, hOld);
@@ -629,14 +651,87 @@ LRESULT CALLBACK EditSubclassProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPa
         break;
     }
     }
-    // 调用原窗口过程
     return CallWindowProc((WNDPROC)GetWindowLongPtr(hWnd, GWLP_USERDATA), hWnd, msg, wParam, lParam);
 }
 
-// 辅助函数：子类化编辑框
 void SubclassEditControl(HWND hEdit, WNDPROC newProc, WNDPROC& oldProc) {
     oldProc = (WNDPROC)SetWindowLongPtr(hEdit, GWLP_WNDPROC, (LONG_PTR)newProc);
     SetWindowLongPtr(hEdit, GWLP_USERDATA, (LONG_PTR)oldProc);
+}
+
+// 同步简约窗口的控件状态（从全局变量更新）
+void UpdateSimpleDialogControls() {
+    if (g_hSimpleDlg) {
+        CheckDlgButton(g_hSimpleDlg, IDC_SIMPLE_ENABLE, g_optimizationEnabled ? BST_CHECKED : BST_UNCHECKED);
+        CheckDlgButton(g_hSimpleDlg, IDC_SIMPLE_FOCUS_ENABLE, g_focusTrackingEnabled ? BST_CHECKED : BST_UNCHECKED);
+        CheckDlgButton(g_hSimpleDlg, IDC_SIMPLE_HIDE_TRAY, g_hideToTray ? BST_CHECKED : BST_UNCHECKED);
+    }
+}
+
+// 同步高级窗口的控件状态
+void UpdateAdvancedDialogControls() {
+    if (g_hAdvancedDlg) {
+        CheckDlgButton(g_hAdvancedDlg, IDC_ENABLE, g_optimizationEnabled ? BST_CHECKED : BST_UNCHECKED);
+        CheckDlgButton(g_hAdvancedDlg, IDC_FOCUS_ENABLE, g_focusTrackingEnabled ? BST_CHECKED : BST_UNCHECKED);
+        CheckDlgButton(g_hAdvancedDlg, IDC_ADVANCED_HIDE_TRAY, g_hideToTray ? BST_CHECKED : BST_UNCHECKED);
+    }
+}
+
+// 托盘功能（仅简约窗口使用）
+void AddTrayIcon(HWND hWnd) {
+    if (g_trayIconAdded) return;
+    memset(&g_nid, 0, sizeof(g_nid));
+    g_nid.cbSize = sizeof(NOTIFYICONDATAW);
+    g_nid.hWnd = hWnd;
+    g_nid.uID = 1;
+    g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    g_nid.uCallbackMessage = WM_TRAYICON;
+    g_nid.hIcon = LoadIconW(g_hInst, MAKEINTRESOURCEW(IDI_MAIN_ICON));
+    wcscpy_s(g_nid.szTip, L"Memory & GPU Optimizer");
+    Shell_NotifyIconW(NIM_ADD, &g_nid);
+    g_trayIconAdded = true;
+}
+
+void RemoveTrayIcon() {
+    if (g_trayIconAdded) {
+        Shell_NotifyIconW(NIM_DELETE, &g_nid);
+        g_trayIconAdded = false;
+    }
+}
+
+void ShowTrayContextMenu(HWND hWnd) {
+    if (g_hTrayMenu) DestroyMenu(g_hTrayMenu);
+    g_hTrayMenu = CreatePopupMenu();
+    AppendMenuW(g_hTrayMenu, MF_STRING, ID_TRAY_OPEN_WINDOW, L"打开窗口");
+    AppendMenuW(g_hTrayMenu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(g_hTrayMenu, MF_STRING, ID_TRAY_DISABLE_OPT, L"关闭优化");
+    AppendMenuW(g_hTrayMenu, MF_STRING, ID_TRAY_ALL_OPT, L"一键三连");
+    AppendMenuW(g_hTrayMenu, MF_STRING, ID_TRAY_MEM_OPT, L"内存优化");
+    AppendMenuW(g_hTrayMenu, MF_STRING, ID_TRAY_VRAM_OPT, L"显存优化");
+    AppendMenuW(g_hTrayMenu, MF_STRING, ID_TRAY_JVM_OPT, L"JVM优化");
+    AppendMenuW(g_hTrayMenu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(g_hTrayMenu, MF_STRING, ID_TRAY_EXIT, L"关闭程序");
+
+    POINT pt;
+    GetCursorPos(&pt);
+    SetForegroundWindow(hWnd);
+    TrackPopupMenu(g_hTrayMenu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hWnd, NULL);
+    PostMessage(hWnd, WM_NULL, 0, 0);
+}
+
+// 统一退出程序
+void ExitProgram() {
+    // 关闭优化功能
+    g_optimizationEnabled = false;
+    WriteIni(L"Settings", L"Enable", L"0");
+    UpdateSimpleDialogControls();
+    UpdateAdvancedDialogControls();
+    // 移除托盘图标
+    RemoveTrayIcon();
+    // 关闭所有窗口并退出消息循环
+    if (g_hSimpleDlg) DestroyWindow(g_hSimpleDlg);
+    if (g_hAdvancedDlg) DestroyWindow(g_hAdvancedDlg);
+    PostQuitMessage(0);
 }
 
 // 高级窗口过程
@@ -646,6 +741,8 @@ INT_PTR CALLBACK AdvancedDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lPar
         g_hAdvancedDlg = hDlg;
         g_hProcList = GetDlgItem(hDlg, IDC_PROCESS_LIST);
         g_hWhiteList = GetDlgItem(hDlg, IDC_WHITE_LIST);
+        g_iconCache.clear();
+        g_defaultIconIndex = -1;
         g_hImageList = ImageList_Create(16, 16, ILC_COLOR32 | ILC_MASK, 32, 32);
         ListView_SetImageList(g_hProcList, g_hImageList, LVSIL_SMALL);
         ListView_SetImageList(g_hWhiteList, g_hImageList, LVSIL_SMALL);
@@ -677,6 +774,7 @@ INT_PTR CALLBACK AdvancedDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lPar
         SetDlgItemInt(hDlg, IDC_XMX_EDIT, g_xmx, FALSE);
         CheckDlgButton(hDlg, IDC_FOCUS_ENABLE, g_focusTrackingEnabled ? BST_CHECKED : BST_UNCHECKED);
         SetDlgItemInt(hDlg, IDC_FOCUS_COUNT, g_maxFocusCount, FALSE);
+        CheckDlgButton(hDlg, IDC_ADVANCED_HIDE_TRAY, g_hideToTray ? BST_CHECKED : BST_UNCHECKED);
         RefreshProcessList();
 
         SetTimer(hDlg, 1, 5000, NULL);
@@ -691,7 +789,6 @@ INT_PTR CALLBACK AdvancedDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lPar
 
         SetButtonsOwnerDraw(hDlg);
 
-        // 子类化两个编辑框
         HWND hSearchEdit = GetDlgItem(hDlg, IDC_SEARCH_EDIT);
         SubclassEditControl(hSearchEdit, EditSubclassProc, g_oldSearchEditProc);
         HWND hCountEdit = GetDlgItem(hDlg, IDC_FOCUS_COUNT);
@@ -720,6 +817,11 @@ INT_PTR CALLBACK AdvancedDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lPar
     case WM_CTLCOLORLISTBOX: {
         HDC hdcStatic = (HDC)wParam;
         SetBkMode(hdcStatic, TRANSPARENT);
+        // 内存状态栏使用白色背景避免文字残留
+        if (GetDlgItem(hDlg, IDC_MEM_INFO) == (HWND)lParam) {
+            static HBRUSH hWhiteBrush = CreateSolidBrush(RGB(255, 255, 255));
+            return (INT_PTR)hWhiteBrush;
+        }
         if (g_hEmptyBrush)
             return (INT_PTR)g_hEmptyBrush;
         else
@@ -764,6 +866,10 @@ INT_PTR CALLBACK AdvancedDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lPar
         case IDC_ENABLE:
             g_optimizationEnabled = (IsDlgButtonChecked(hDlg, IDC_ENABLE) == BST_CHECKED);
             WriteIni(L"Settings", L"Enable", g_optimizationEnabled ? L"1" : L"0");
+            break;
+        case IDC_ADVANCED_HIDE_TRAY:
+            g_hideToTray = (IsDlgButtonChecked(hDlg, IDC_ADVANCED_HIDE_TRAY) == BST_CHECKED);
+            WriteIni(L"Settings", L"HideToTray", g_hideToTray ? L"1" : L"0");
             break;
         case IDC_BTN_REFRESH: RefreshProcessList(); break;
         case IDC_BTN_ADD_WHITE: {
@@ -856,6 +962,7 @@ INT_PTR CALLBACK AdvancedDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lPar
             break;
         }
         case IDC_BTN_BACK_TO_SIMPLE: {
+            UpdateSimpleDialogControls();   // 同步简约窗口状态
             DestroyWindow(hDlg);
             if (g_hSimpleDlg) {
                 ShowWindow(g_hSimpleDlg, SW_SHOW);
@@ -923,8 +1030,21 @@ INT_PTR CALLBACK AdvancedDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lPar
         break;
     }
     case WM_CLOSE: {
-        DestroyWindow(hDlg);
-        if (g_hSimpleDlg) ShowWindow(g_hSimpleDlg, SW_SHOW);
+        if (g_hideToTray) {
+            // 隐藏高级窗口，确保简约窗口的托盘图标存在
+            ShowWindow(hDlg, SW_HIDE);
+            if (g_hSimpleDlg && !g_trayIconAdded) {
+                AddTrayIcon(g_hSimpleDlg);
+            }
+        }
+        else {
+            UpdateSimpleDialogControls();
+            DestroyWindow(hDlg);
+            if (g_hSimpleDlg) {
+                ShowWindow(g_hSimpleDlg, SW_SHOW);
+                SetForegroundWindow(g_hSimpleDlg);
+            }
+        }
         break;
     }
     case WM_DESTROY: {
@@ -950,11 +1070,13 @@ INT_PTR CALLBACK SimpleDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam
             MessageBoxW(hDlg, L"程序未以管理员身份运行，部分优化功能可能受限。建议以管理员权限重新启动。", L"权限提示", MB_ICONWARNING);
         }
         g_optimizationEnabled = (ReadIni(L"Settings", L"Enable", L"1") == L"1");
-        CheckDlgButton(hDlg, IDC_SIMPLE_ENABLE, g_optimizationEnabled ? BST_CHECKED : BST_UNCHECKED);
         g_focusTrackingEnabled = (ReadIni(L"Settings", L"FocusTracking", L"0") == L"1");
-        CheckDlgButton(hDlg, IDC_SIMPLE_FOCUS_ENABLE, g_focusTrackingEnabled ? BST_CHECKED : BST_UNCHECKED);
         g_maxFocusCount = _wtoi(ReadIni(L"Settings", L"FocusCount", L"1").c_str());
         if (g_maxFocusCount < 1) g_maxFocusCount = 1;
+        g_hideToTray = (ReadIni(L"Settings", L"HideToTray", L"1") == L"1");
+        CheckDlgButton(hDlg, IDC_SIMPLE_ENABLE, g_optimizationEnabled ? BST_CHECKED : BST_UNCHECKED);
+        CheckDlgButton(hDlg, IDC_SIMPLE_FOCUS_ENABLE, g_focusTrackingEnabled ? BST_CHECKED : BST_UNCHECKED);
+        CheckDlgButton(hDlg, IDC_SIMPLE_HIDE_TRAY, g_hideToTray ? BST_CHECKED : BST_UNCHECKED);
         SetFocusTracking(g_focusTrackingEnabled);
 
         RECT rcSimple;
@@ -1022,15 +1144,28 @@ INT_PTR CALLBACK SimpleDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam
     case WM_COMMAND: {
         switch (LOWORD(wParam)) {
         case IDC_SIMPLE_JVM_OPT:
-            std::thread(OptimizeJavaProcesses).detach();
+            if (g_optimizationEnabled) {
+                std::thread(OptimizeJavaProcesses).detach();
+            }
             break;
         case IDC_SIMPLE_MEM_OPT:
-            std::thread(CleanMemoryThread).detach();
+            if (g_optimizationEnabled) {
+                std::thread(CleanMemoryThread).detach();
+            }
             break;
         case IDC_SIMPLE_VRAM_OPT:
-            std::thread(GameBoostThread).detach();
+            if (g_optimizationEnabled) {
+                std::thread(GameBoostThread).detach();
+            }
             break;
         case IDC_SIMPLE_ALL_OPT:
+            // 一键三连：如果未开启优化，则先开启
+            if (!g_optimizationEnabled) {
+                g_optimizationEnabled = true;
+                WriteIni(L"Settings", L"Enable", L"1");
+                UpdateSimpleDialogControls();
+                UpdateAdvancedDialogControls();
+            }
             std::thread([]() {
                 CleanMemoryThread();
                 GameBoostThread();
@@ -1056,6 +1191,11 @@ INT_PTR CALLBACK SimpleDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam
         case IDC_SIMPLE_ENABLE: {
             g_optimizationEnabled = (IsDlgButtonChecked(hDlg, IDC_SIMPLE_ENABLE) == BST_CHECKED);
             WriteIni(L"Settings", L"Enable", g_optimizationEnabled ? L"1" : L"0");
+            break;
+        }
+        case IDC_SIMPLE_HIDE_TRAY: {
+            g_hideToTray = (IsDlgButtonChecked(hDlg, IDC_SIMPLE_HIDE_TRAY) == BST_CHECKED);
+            WriteIni(L"Settings", L"HideToTray", g_hideToTray ? L"1" : L"0");
             break;
         }
         case IDC_SIMPLE_FOCUS_ENABLE: {
@@ -1089,8 +1229,13 @@ INT_PTR CALLBACK SimpleDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam
         break;
     }
     case WM_CLOSE: {
-        DestroyWindow(hDlg);
-        PostQuitMessage(0);
+        if (g_hideToTray) {
+            ShowWindow(hDlg, SW_HIDE);
+            AddTrayIcon(hDlg);
+        }
+        else {
+            ExitProgram();
+        }
         break;
     }
     case WM_DESTROY: {
@@ -1098,8 +1243,71 @@ INT_PTR CALLBACK SimpleDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam
         g_hSimpleDlg = nullptr;
         break;
     }
+    case WM_TRAYICON: {
+        if (lParam == WM_RBUTTONUP) {
+            ShowTrayContextMenu(hDlg);
+        }
+        else if (lParam == WM_LBUTTONUP) {
+            ShowWindow(hDlg, SW_SHOW);
+            SetForegroundWindow(hDlg);
+            // 如果高级窗口存在，同步控件状态
+            if (g_hAdvancedDlg) {
+                UpdateSimpleDialogControls();
+            }
+        }
+        break;
+    }
     }
     return FALSE;
+}
+
+// 托盘菜单命令处理
+void HandleTrayCommand(WORD cmd) {
+    switch (cmd) {
+    case ID_TRAY_OPEN_WINDOW:
+        if (g_hSimpleDlg) {
+            ShowWindow(g_hSimpleDlg, SW_SHOW);
+            SetForegroundWindow(g_hSimpleDlg);
+        }
+        break;
+    case ID_TRAY_DISABLE_OPT:
+        g_optimizationEnabled = false;
+        WriteIni(L"Settings", L"Enable", L"0");
+        UpdateSimpleDialogControls();
+        UpdateAdvancedDialogControls();
+        break;
+    case ID_TRAY_ALL_OPT:
+        // 一键三连：如果未开启优化，则先开启
+        if (!g_optimizationEnabled) {
+            g_optimizationEnabled = true;
+            WriteIni(L"Settings", L"Enable", L"1");
+            UpdateSimpleDialogControls();
+            UpdateAdvancedDialogControls();
+        }
+        std::thread([]() {
+            CleanMemoryThread();
+            GameBoostThread();
+            }).detach();
+        break;
+    case ID_TRAY_MEM_OPT:
+        if (g_optimizationEnabled) {
+            std::thread(CleanMemoryThread).detach();
+        }
+        break;
+    case ID_TRAY_VRAM_OPT:
+        if (g_optimizationEnabled) {
+            std::thread(GameBoostThread).detach();
+        }
+        break;
+    case ID_TRAY_JVM_OPT:
+        if (g_optimizationEnabled) {
+            std::thread(OptimizeJavaProcesses).detach();
+        }
+        break;
+    case ID_TRAY_EXIT:
+        ExitProgram();
+        break;
+    }
 }
 
 int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPWSTR lpCmdLine, _In_ int nCmdShow) {
@@ -1109,7 +1317,6 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, 
     GdiplusStartupInput gdiplusStartupInput;
     GdiplusStartup(&g_gdiplusToken, &gdiplusStartupInput, NULL);
 
-    // 从资源加载背景图片
     g_hBgSimple = LoadBitmap(hInstance, MAKEINTRESOURCE(IDB_BACKGROUND_SIMPLE));
     g_hBgAdvanced = LoadBitmap(hInstance, MAKEINTRESOURCE(IDB_BACKGROUND_ADVANCED));
     g_hEmptyBrush = (HBRUSH)GetStockObject(NULL_BRUSH);
@@ -1117,7 +1324,6 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, 
     if (!g_hBgSimple) MessageBoxW(NULL, L"加载简约窗口背景图失败！", L"错误", MB_ICONERROR);
     if (!g_hBgAdvanced) MessageBoxW(NULL, L"加载高级窗口背景图失败！", L"错误", MB_ICONERROR);
 
-    // 检查配置文件是否存在（判断是否首次运行）
     std::wstring iniPath = GetConfigFilePath();
     bool isFirstRun = (GetFileAttributesW(iniPath.c_str()) == INVALID_FILE_ATTRIBUTES);
 
@@ -1127,6 +1333,28 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, 
     g_maxFocusCount = _wtoi(ReadIni(L"Settings", L"FocusCount", L"1").c_str());
     if (g_maxFocusCount < 1) g_maxFocusCount = 1;
     g_xmx = _wtoi(ReadIni(L"Settings", L"JvmXmx", L"2048").c_str());
+    g_hideToTray = (ReadIni(L"Settings", L"HideToTray", L"1") == L"1");
+
+    // 初始化隐藏默认白名单：包括程序自身和系统关键进程
+    g_defaultWhiteSet.insert(L"explorer.exe");
+    g_defaultWhiteSet.insert(L"ctfmon.exe");
+    g_defaultWhiteSet.insert(L"taskhostw.exe");
+    g_defaultWhiteSet.insert(L"dwm.exe");
+    g_defaultWhiteSet.insert(L"SearchIndexer.exe");
+    // 添加程序自身
+    WCHAR selfPath[MAX_PATH];
+    GetModuleFileNameW(NULL, selfPath, MAX_PATH);
+    wchar_t* selfName = wcsrchr(selfPath, L'\\');
+    if (selfName) selfName++;
+    else selfName = selfPath;
+    std::wstring selfExe = ToLower(selfName);
+    g_defaultWhiteSet.insert(selfExe);
+
+    // 启动时强制关闭优化（确保没有自动优化）
+    if (g_optimizationEnabled) {
+        g_optimizationEnabled = false;
+        WriteIni(L"Settings", L"Enable", L"0");
+    }
 
     HWND hDlg = CreateDialogW(hInstance, MAKEINTRESOURCEW(IDD_SIMPLE_DIALOG), NULL, SimpleDlgProc);
     if (!hDlg) return 1;
@@ -1136,7 +1364,6 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, 
     ShowWindow(hDlg, nCmdShow);
     UpdateWindow(hDlg);
 
-    // 首次运行时弹出帮助对话框
     if (isFirstRun) {
         MessageBoxW(hDlg,
             L"感谢您使用本工具！\n\n - - - > 开发者：Heszer < - - - \n 邮箱：h3532886804@163.com \n\n本工具用于对内存、显存、JVM的优化，\n通过手动或自动清理内存工作集、待机列表，适合游戏或大型软件运行前释放资源。\n不会删除您的任何文件，也不会修改注册表或系统配置。\n\n【注意事项】\n• 清理内存时，后台程序（如浏览器、文档编辑器）可能会短暂响应变慢，这是正常现象。\n  建议使用重要软件前先手动保存，避免意外丢失数据。\n• 部分高级功能需要管理员身份才能生效，若非管理员账户，功能会自动降级或提示。\n• 本工具在 Windows 11 上测试通过，理论支持 Windows 7 及更高版本，\n  但由于杀毒软件、驱动或系统补丁差异，个别功能可能无法使用，还请理解。\n• 本工具不会联网上传任何数据，也不会偷偷记录您的信息。\n  所有配置保存在 %LocalAppData%\\MemoryOptimizer\\Optimizer.ini。\n\n【责任说明】\n使用时请谨记保存重要文件，以免出现内存误删的情况，开发者仅提供技术支持，出现任何问题请自行承担。",
@@ -1145,7 +1372,13 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, 
 
     MSG msg;
     while (GetMessageW(&msg, NULL, 0, 0)) {
-        if (!IsDialogMessageW(hDlg, &msg)) {
+        if (msg.hwnd == g_hSimpleDlg && msg.message == WM_COMMAND && HIWORD(msg.lParam) == 0 && msg.lParam == 0) {
+            if (msg.wParam >= 3000 && msg.wParam <= 3007) {
+                HandleTrayCommand((WORD)msg.wParam);
+                continue;
+            }
+        }
+        if (!IsDialogMessageW(g_hSimpleDlg, &msg)) {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
@@ -1153,6 +1386,7 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, 
     if (g_hWinEventHook) UnhookWinEvent(g_hWinEventHook);
     if (g_hBgSimple) DeleteObject(g_hBgSimple);
     if (g_hBgAdvanced) DeleteObject(g_hBgAdvanced);
+    RemoveTrayIcon();
     GdiplusShutdown(g_gdiplusToken);
     return (int)msg.wParam;
 }

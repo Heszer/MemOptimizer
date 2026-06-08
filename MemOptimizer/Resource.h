@@ -17,6 +17,7 @@
 #define IDC_SIMPLE_ENABLE           2005
 #define IDC_SIMPLE_FOCUS_ENABLE     2006
 #define IDC_SIMPLE_ADVANCED         2007
+#define IDC_SIMPLE_HIDE_TRAY        2009   // 新增：简约窗口隐藏到托盘
 
 // 高级窗口控件
 #define IDC_ENABLE                  1001
@@ -42,6 +43,7 @@
 #define IDC_BTN_RESET_DEFAULTS      1021
 #define IDC_BTN_HELP                1022
 #define IDC_BTN_BACK_TO_SIMPLE      1023
+#define IDC_ADVANCED_HIDE_TRAY      1024   // 新增：高级窗口隐藏到托盘
 
 // 背景图资源
 #define IDB_BACKGROUND_SIMPLE       110
@@ -49,3 +51,6 @@
 
 // 嵌入 EmptyStandbyList.exe
 #define IDR_EMPTY_STANDBY_LIST      108
+
+// 托盘消息
+#define WM_TRAYICON                 (WM_APP + 1)
